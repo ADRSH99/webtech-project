@@ -1,0 +1,21 @@
+# ML Model Deployment Platform - Requirements
+# Backend dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Docker SDK for Python
+docker>=6.1.0
+
+# ML Frameworks (install based on your needs)
+scikit-learn>=1.3.0
+torch>=2.1.0
+onnxruntime>=1.16.0
+
+# Gradio for UI generation
+gradio>=4.0.0
+
+# Core utilities
+numpy>=1.24.0
+pillow>=10.0.0
+joblib>=1.3.0
