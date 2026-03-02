@@ -198,12 +198,13 @@ class DockerManager:
                 detail=f"Failed to build Docker image: {str(e)}"
             )
     
-    def run_container(self, image_tag: str) -> Dict[str, any]:
+    def run_container(self, image_tag: str, labels: Optional[Dict[str, str]] = None) -> Dict[str, any]:
         """
         Run Docker container with resource limits.
         
         Args:
             image_tag: Image to run
+            labels: Additional labels for the container
         
         Returns:
             Dictionary with container_id and host_port
@@ -214,6 +215,14 @@ class DockerManager:
         try:
             logger.info(f"Running container from image: {image_tag}")
             
+            # Default labels
+            container_labels = {
+                "ml-deploy": "true",
+                "managed-by": "ml-deploy-platform"
+            }
+            if labels:
+                container_labels.update(labels)
+
             # Run container with security and resource constraints
             container = self.client.containers.run(
                 image=image_tag,
@@ -224,10 +233,7 @@ class DockerManager:
                 cpu_period=100000,
                 network_mode=NETWORK_MODE,  # Enable port mapping for Gradio access
                 remove=True,  # Auto-remove on stop
-                labels={
-                    "ml-deploy": "true",
-                    "managed-by": "ml-deploy-platform"
-                }
+                labels=container_labels
             )
             
             # Get assigned host port
@@ -353,8 +359,14 @@ class DockerManager:
             # Build image
             image_tag = self.build_image(container_id)
             
+            # Prepare labels for identification
+            labels = {
+                "ml-deploy": "true",
+                "ml-framework": framework
+            }
+            
             # Run container
-            run_result = self.run_container(image_tag)
+            run_result = self.run_container(image_tag, labels=labels)
             
             host_port = run_result["host_port"]
             
@@ -459,6 +471,43 @@ class DockerManager:
         except Exception as e:
             logger.error(f"Failed to cleanup all containers: {e}")
     
+    def list_containers(self) -> list:
+        """
+        List all managed containers by querying Docker API.
+        
+        Returns:
+            List of container information dictionaries
+        """
+        if not self.client:
+            return []
+        
+        try:
+            containers = self.client.containers.list(filters={"label": "ml-deploy=true"})
+            result = []
+            
+            for container in containers:
+                labels = container.labels
+                port_bindings = container.ports
+                host_port = None
+                
+                if port_bindings and f'{CONTAINER_PORT}/tcp' in port_bindings:
+                    port_info = port_bindings[f'{CONTAINER_PORT}/tcp']
+                    if port_info and len(port_info) > 0:
+                        host_port = port_info[0]['HostPort']
+                
+                result.append({
+                    "container_id": container.id[:12],
+                    "full_id": container.id,
+                    "status": container.status,
+                    "url": f"http://localhost:{host_port}" if host_port else None,
+                    "framework": labels.get("ml-framework", "unknown")
+                })
+            
+            return result
+        except Exception as e:
+            logger.error(f"Failed to list containers: {e}")
+            return []
+
     def stop_container(self, container_id: str) -> None:
         """
         Stop a running container.

@@ -1,79 +1,74 @@
-# ML Model Deployment Platform
+# ModelForge 🚀
 
-A lightweight web-based platform for deploying machine learning models with auto-generated Gradio interfaces, containerized with Docker for security and isolation.
+A powerful, lightweight web-based platform for deploying machine learning models with **auto-generated Gradio interfaces**, secured by **JWT authentication** and isolated with **Docker containers**.
 
 ## 🎯 Overview
 
-This platform allows users to:
-- Upload ML models (sklearn, PyTorch, ONNX)
-- Upload a configuration file specifying model behavior
-- Automatically generate an interactive Gradio web interface
-- Deploy in isolated Docker containers with resource limits
-- Receive a public URL to access the deployed model
+ModelForge abstracts away the complexity of ML deployment. Simply upload your model and a configuration file, and the platform handles:
+- **Auto-UI Generation**: Creates a full Gradio interface based on your model's task (Classification/Regression).
+- **Secure Isolation**: Runs each model in a separate Docker container with strict resource limits.
+- **Persistent Management**: Tracks all deployments in a SQLite database.
+- **Access Control**: JWT-based authentication ensures only authorized users can deploy or manage models.
 
-## 🏗 Architecture
+## 🏗 Project Structure
 
 ```
-project/
-│
+webtech-project/
 ├── backend/
-│   ├── main.py              # FastAPI entry point
-│   ├── config_validator.py  # Configuration validation
-│   ├── app_generator.py     # Dynamic Gradio app generation
-│   ├── docker_manager.py    # Container lifecycle management
-│   ├── storage/             # Storage directories
-│   │   ├── uploads/         # Temporary upload storage
-│   │   └── containers/      # Container working directories
-│   └── docker/
-│       └── Dockerfile.template  # Docker image template
-│
+│   ├── main.py              # FastAPI orchestrator
+│   ├── auth.py              # JWT + bcrypt security
+│   ├── config_validator.py  # Pydantic schema validation
+│   ├── app_generator.py     # Dynamic Gradio code generation
+│   ├── docker_manager.py    # Docker SDK lifecycle management
+│   └── database.py          # SQLite persistence layer
 ├── frontend/
-│   └── index.html           # Web interface with iframe support
-│
-├── example_config.json      # Example configuration
-├── requirements.txt         # Python dependencies
-└── README.md               # This file
+│   ├── src/                 # React source (App.jsx, main.jsx)
+│   ├── tailwind.config.js   # UI Design System
+│   └── vite.config.js       # Fast build configuration
+├── tests/                   # Sample models and test scripts
+└── v3_modelforge.md         # Full project report
 ```
 
-## 🚀 Quick Start
+## 🚀 Getting Started
 
 ### Prerequisites
-
 - Python 3.10+
-- Docker installed and running
-- pip package manager
+- Node.js 18+
+- Docker Desktop or Docker Engine installed and running
 
-### Installation
-
-1. Clone or navigate to the project directory
-2. Install dependencies:
+### 1. Backend Setup
 ```bash
-pip install -r requirements.txt
-```
-
-### Running the Server
-
-```bash
+# It is recommended to use the virtualenv provided in the parent directory
+source ../venv/bin/activate
 cd backend
+
+# Install dependencies if not already done
+pip install -r ../requirements.txt
+
+# Start the API server
 python main.py
 ```
+*The API will be available at `http://localhost:8000`*
 
-The API will be available at `http://localhost:8000`
+### 2. Frontend Setup
+```bash
+cd frontend
+npm install
+npm run dev
+```
+*Access the dashboard at `http://localhost:5173`*
 
-### Using the Web Interface
+## 🔐 Authentication Flow
 
-Open `frontend/index.html` in your browser to access the web interface:
-
-- Upload model and configuration files
-- View deployed models
-- Open Gradio interfaces in embedded iframes
-- Stop running containers
-
-The frontend communicates with the backend API at `http://localhost:8000`.
+ModelForge uses a stateless JWT authentication system:
+1. **Register/Login**: Users create an account or sign in through the dashboard.
+2. **Token Storage**: A JWT token is stored in `localStorage`.
+3. **Protected Actions**: Deploying, stopping, or cleaning up containers requires the token to be sent in the `Authorization` header.
+4. **Security**: Passwords are never stored in plaintext (secured with `bcrypt`).
 
 ## 📋 Configuration Schema
 
-The `config.json` file must follow this schema:
+Each model requires a `config.json` to define its interface:
 
 ```json
 {
@@ -81,7 +76,7 @@ The `config.json` file must follow this schema:
   "task": "classification | regression",
   "input": {
     "type": "numeric | text | image",
-    "features": 4  // Required for numeric type
+    "features": 4  // Required for numeric
   },
   "output": {
     "type": "label | number | text"
@@ -89,192 +84,41 @@ The `config.json` file must follow this schema:
 }
 ```
 
-### Framework-Extension Mapping
+## 🧪 Testing
 
-| Framework | Model Extension |
-|-----------|----------------|
-| sklearn   | .pkl          |
-| pytorch   | .pt           |
-| onnx      | .onnx         |
+We provide pre-trained sample models in the `tests/` directory.
 
-### Task-Output Compatibility
-
-| Task          | Valid Output Types |
-|---------------|-------------------|
-| classification | label            |
-| regression    | number            |
-
-## 🧪 Testing with cURL
-
-### Example 1: sklearn Classification Model
-
-Create a test model first:
-```python
-# test_model.py - Run this to create a sample model
-from sklearn.ensemble import RandomForestClassifier
-import joblib
-
-# Create sample model
-model = RandomForestClassifier(n_estimators=10, random_state=42)
-X = [[1, 2, 3, 4], [2, 3, 4, 5], [3, 4, 5, 6], [4, 5, 6, 7]]
-y = [0, 1, 0, 1]
-model.fit(X, y)
-
-# Save model
-joblib.dump(model, "test_model.pkl")
-print("Model saved as test_model.pkl")
-```
-
-Then deploy:
+**Quick Test via cURL (Requires Auth Token):**
 ```bash
+# 1. Login to get token
+# 2. Deploy sample classifier
 curl -X POST http://localhost:8000/deploy-model \
-  -F "model_file=@test_model.pkl" \
-  -F "config_file=@example_config.json"
-```
-
-### Example 2: Different Configurations
-
-**Numeric Regression (sklearn):**
-```json
-{
-  "framework": "sklearn",
-  "task": "regression",
-  "input": { "type": "numeric", "features": 3 },
-  "output": { "type": "number" }
-}
-```
-
-**Text Classification (PyTorch):**
-```json
-{
-  "framework": "pytorch",
-  "task": "classification",
-  "input": { "type": "text" },
-  "output": { "type": "label" }
-}
-```
-
-**Image Classification (ONNX):**
-```json
-{
-  "framework": "onnx",
-  "task": "classification",
-  "input": { "type": "image" },
-  "output": { "type": "label" }
-}
-```
-
-## 🔌 API Endpoints
-
-### Health Check
-```
-GET /health
-```
-
-### Deploy Model
-```
-POST /deploy-model
-Content-Type: multipart/form-data
-
-Parameters:
-  - model_file: Model file (.pkl, .pt, .onnx)
-  - config_file: JSON configuration file
-
-Response:
-{
-  "status": "success",
-  "container_id": "abc123...",
-  "url": "http://localhost:7861",
-  "framework": "sklearn",
-  "task": "classification"
-}
-```
-
-### Stop Container
-```
-DELETE /containers/{container_id}
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
+  -F "model_file=@tests/test_classifier.pkl" \
+  -F "config_file=@tests/test_classifier_config.json"
 ```
 
 ## 🔒 Security Features
 
-- **No arbitrary code execution**: Only model files and configs are accepted
-- **Non-root containers**: Docker containers run as unprivileged user
-- **Network isolation**: Containers run with `--network none`
-- **Resource limits**: 
-  - Memory: 512MB per container
-  - CPU: 0.5 cores per container
-- **Input validation**: Strict schema validation for configurations
+- **Container Isolation**: Each model runs in its own sandbox.
+- **Resource Limits**: 512MB RAM and 0.5 CPU core maximum per container.
+- **Non-Root Guard**: Containers execute as an unprivileged `appuser`.
+- **JWT Protection**: destructive API endpoints are gated behind token validation.
+- **Input Sanitization**: Strict Pydantic validation on all uploaded configurations.
 
-## 🐳 Docker Configuration
+## 🛠 Modules
 
-Each deployment creates:
-1. Unique container directory
-2. Dockerfile from template
-3. Isolated image with minimal dependencies
-4. Container with security constraints
+- **`main.py`**: The central FastAPI hub.
+- **`auth.py`**: Manages registration, login, and token verification.
+- **`app_generator.py`**: The logic engine that "writes" Python code for the model UI.
+- **`docker_manager.py`**: Builds images from templates and manages container state.
+- **`database.py`**: SQLite adapter for deployment and user data.
 
-### Resource Limits Applied
-```bash
---memory 512m
---cpu-quota 50000  # 0.5 CPU cores
---network none     # No network access
-```
+## 📜 Project Documentation
 
-## 📊 Monitoring
+For deeper details, refer to:
+- [V3 Project Report](v3_modelforge.md)
+- [Line-by-Line Code Explanation](explanations.md)
 
-The platform logs:
-- Container creation and startup
-- Build progress
-- Deployment status
-- Errors and warnings
-
-View logs in console output or integrate with your logging solution.
-
-## 🔧 Troubleshooting
-
-### Docker not available
-```
-Error: Docker is not available
-```
-Ensure Docker Desktop or Docker Engine is running on your system.
-
-### Invalid config
-```
-Error: Config validation failed
-```
-Check your config.json against the schema requirements.
-
-### Model loading errors
-Ensure your model file matches the specified framework extension.
-
-## 📝 Development
-
-### Module Structure
-
-**config_validator.py**: Validates JSON configs, checks framework-extension compatibility, ensures task-output consistency.
-
-**app_generator.py**: Dynamically generates Gradio application code based on config:
-- Maps input types to Gradio components
-- Generates framework-specific loading code
-- Creates prediction functions
-
-**docker_manager.py**: Manages container lifecycle:
-- Creates container directories
-- Builds images
-- Runs containers with security constraints
-- Handles cleanup
-
-**main.py**: FastAPI entry point orchestrating the entire deployment flow.
-
-## 📜 License
-
-This is an MVP implementation for demonstration purposes.
-
-## 🚧 Future Enhancements
-
-- Authentication and authorization
-- Container auto-cleanup after timeout
-- Model versioning
-- Monitoring dashboard
-- Multi-model support per container
-- GPU support for deep learning models
+---
+*Developed for the Web Technologies and Applications (IT254) course.*

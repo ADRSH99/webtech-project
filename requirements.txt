@@ -15,6 +15,16 @@ onnxruntime>=1.16.0
 # Gradio for UI generation
 gradio>=4.0.0
 
+# Data validation
+pydantic>=2.0.0
+
+# HTTP client (used by docker_manager health checks)
+requests>=2.31.0
+
+# Authentication
+pyjwt>=2.8.0
+bcrypt>=4.0.0
+
 # Core utilities
 numpy>=1.24.0
 pillow>=10.0.0

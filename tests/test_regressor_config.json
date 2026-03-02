@@ -1,0 +1,11 @@
+{
+  "framework": "sklearn",
+  "task": "regression",
+  "input": {
+    "type": "numeric",
+    "features": 3
+  },
+  "output": {
+    "type": "number"
+  }
+}

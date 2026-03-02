@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 """
 Main FastAPI Application
 Entry point for the ML model deployment platform.
@@ -8,16 +7,24 @@ Handles file uploads, orchestrates validation, app generation, and deployment.
 import os
 import tempfile
 import shutil
-from typing import Optional
+import asyncio
+from typing import Optional, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 # Import modules
 from config_validator import parse_and_validate_config
 from app_generator import generate_gradio_app, save_app_to_file
 from docker_manager import DockerManager
+from database import (
+    init_db, add_deployment, get_all_deployments,
+    remove_deployment, remove_all_deployments,
+    add_user, get_user_by_username
+)
+from auth import hash_password, verify_password, create_token, get_current_user
+from pydantic import BaseModel
 
 # Configuration
 STORAGE_DIR = os.getenv("STORAGE_DIR", "storage")
@@ -28,7 +35,31 @@ TEMPLATES_DIR = DOCKER_DIR
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "100")) * 1024 * 1024  # 100MB default
 ALLOWED_MODEL_EXTENSIONS = {".pkl", ".pt", ".pth", ".onnx"}
 ALLOWED_CONFIG_EXTENSIONS = {".json"}
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080").split(",")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080,http://localhost:5173").split(",")
+
+# Pydantic models for responses
+class DeploymentResponse(BaseModel):
+    status: str
+    container_id: str
+    url: str
+    framework: str
+    task: str
+
+class ContainerInfo(BaseModel):
+    id: int
+    container_id: str
+    internal_id: str
+    model_name: str
+    framework: str
+    task: str
+    host_port: Optional[int]
+    url: Optional[str]
+    status: str
+    created_at: str
+
+class AuthRequest(BaseModel):
+    username: str
+    password: str
 
 
 def ensure_directories():
@@ -77,12 +108,14 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     # Startup
     ensure_directories()
+    init_db()  # Initialize SQLite
     global docker_manager
     docker_manager = DockerManager(STORAGE_DIR, DOCKER_DIR)
     
     print("✓ ML Deployment Platform started")
     print(f"✓ Uploads directory: {UPLOADS_DIR}")
     print(f"✓ Containers directory: {CONTAINERS_DIR}")
+    print(f"✓ SQLite database initialized")
     
     if docker_manager.is_docker_available():
         print("✓ Docker manager initialized successfully")
@@ -134,10 +167,45 @@ async def health_check():
     }
 
 
+@app.post("/auth/register")
+async def register(body: AuthRequest):
+    """
+    Register a new user account.
+    """
+    if len(body.username) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+    if len(body.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    
+    existing = get_user_by_username(body.username)
+    if existing:
+        raise HTTPException(status_code=409, detail="Username already exists")
+    
+    hashed = hash_password(body.password)
+    user_id = add_user(body.username, hashed)
+    token = create_token(user_id, body.username)
+    
+    return {"status": "success", "token": token, "username": body.username}
+
+
+@app.post("/auth/login")
+async def login(body: AuthRequest):
+    """
+    Login with username and password. Returns a JWT token.
+    """
+    user = get_user_by_username(body.username)
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    token = create_token(user["id"], user["username"])
+    return {"status": "success", "token": token, "username": user["username"]}
+
+
 @app.post("/deploy-model")
 async def deploy_model(
     model_file: UploadFile = File(..., description="ML model file (.pkl, .pt, or .onnx)"),
-    config_file: UploadFile = File(..., description="Configuration file (config.json)")
+    config_file: UploadFile = File(..., description="Configuration file (config.json)"),
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Deploy an ML model with auto-generated Gradio interface.
@@ -221,9 +289,18 @@ async def deploy_model(
             framework=config['framework']
         )
         
-        print(f"✓ Model deployed successfully")
-        print(f"  Container ID: {deployment_result['container_id']}")
-        print(f"  URL: {deployment_result['url']}")
+        # Save to SQLite
+        add_deployment(
+            container_id=deployment_result["container_id"],
+            internal_id=deployment_result["internal_container_id"],
+            model_name=model_file.filename,
+            framework=config['framework'],
+            task=config['task'],
+            host_port=deployment_result["host_port"],
+            url=deployment_result["url"]
+        )
+        
+        print(f"✓ Model deployed and saved to database")
         
         return {
             "status": "success",
@@ -247,8 +324,23 @@ async def deploy_model(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+@app.get("/containers", response_model=List[ContainerInfo])
+async def list_containers():
+    """
+    List all active ML model deployments from SQLite.
+    """
+    try:
+        deployments = get_all_deployments()
+        return deployments
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch deployments from DB: {str(e)}"
+        )
+
+
 @app.delete("/containers/cleanup-all")
-async def cleanup_all_containers():
+async def cleanup_all_containers(current_user: dict = Depends(get_current_user)):
     """
     Clean up all managed containers and their resources.
     Must be defined BEFORE /containers/{container_id} to avoid route shadowing.
@@ -258,6 +350,7 @@ async def cleanup_all_containers():
     
     try:
         docker_manager.cleanup_all_containers()
+        remove_all_deployments()
         return {"status": "success", "message": "All containers cleaned up"}
     except Exception as e:
         raise HTTPException(
@@ -267,7 +360,7 @@ async def cleanup_all_containers():
 
 
 @app.delete("/containers/{container_id}/cleanup")
-async def cleanup_container(container_id: str):
+async def cleanup_container(container_id: str, current_user: dict = Depends(get_current_user)):
     """
     Stop and clean up a container and its resources.
     
@@ -279,6 +372,7 @@ async def cleanup_container(container_id: str):
     
     try:
         docker_manager.cleanup_container(container_id)
+        remove_deployment(container_id)
         return {"status": "success", "message": f"Container {container_id} cleaned up"}
     except Exception as e:
         raise HTTPException(
@@ -288,7 +382,7 @@ async def cleanup_container(container_id: str):
 
 
 @app.delete("/containers/{container_id}")
-async def stop_container(container_id: str):
+async def stop_container(container_id: str, current_user: dict = Depends(get_current_user)):
     """
     Stop a running container.
     
@@ -300,6 +394,7 @@ async def stop_container(container_id: str):
     
     try:
         docker_manager.stop_container(container_id)
+        remove_deployment(container_id)
         return {"status": "success", "message": f"Container {container_id} stopped"}
     except Exception as e:
         raise HTTPException(
