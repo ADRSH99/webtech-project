@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """
 Main FastAPI Application
 Entry point for the ML model deployment platform.
