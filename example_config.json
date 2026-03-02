@@ -1,0 +1,11 @@
+{
+  "framework": "sklearn",
+  "task": "classification",
+  "input": {
+    "type": "numeric",
+    "features": 4
+  },
+  "output": {
+    "type": "label"
+  }
+}
