@@ -1,63 +1,59 @@
-import React, { useState, useEffect } from 'react';
-import axios from 'axios';
-import {
-  Upload,
-  RefreshCw,
-  Trash2,
-  ExternalLink,
-  CheckCircle2,
-  AlertCircle,
-  Activity,
-  Clock,
-  LogOut,
-  LogIn,
-  X
-} from 'lucide-react';
-import { clsx } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+﻿import React, { useState, useEffect } from 'react';
+import api from './api';
+import Sidebar from './components/Sidebar';
+import Topbar from './components/Topbar';
+import StatCard from './components/StatCard';
+import DeployCard from './components/DeployCard';
+import DeploymentItem from './components/DeploymentItem';
+import LogsPanel from './components/LogsPanel';
+import ModelsPanel from './components/ModelsPanel';
+import SettingsPanel from './components/SettingsPanel';
+import { Activity, Server, AlertCircle, LogIn, RefreshCw } from 'lucide-react';
 
-function cn(...inputs) {
-  return twMerge(clsx(inputs));
-}
-
-const API_BASE = 'http://localhost:8000';
-
-/* ── Axios helper that attaches the JWT token ── */
-const authHeaders = () => {
-  const token = localStorage.getItem('mf_token');
-  return token ? { Authorization: `Bearer ${token}` } : {};
-};
-
-const App = () => {
-  /* ── Auth state ── */
+export default function App() {
   const [token, setToken] = useState(localStorage.getItem('mf_token'));
-  const [username, setUsername] = useState(localStorage.getItem('mf_user') || '');
-  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
+  const [authMode, setAuthMode] = useState('login');
   const [authForm, setAuthForm] = useState({ username: '', password: '' });
   const [authError, setAuthError] = useState(null);
   const [authLoading, setAuthLoading] = useState(false);
 
-  /* ── App state ── */
+  const [activeTab, setActiveTab] = useState('dashboard');
   const [deployments, setDeployments] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [message, setMessage] = useState(null);
-  const [selectedModelUrl, setSelectedModelUrl] = useState(null);
+  const [models, setModels] = useState([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [healthStatus, setHealthStatus] = useState(null);
+  const [activeContainerId, setActiveContainerId] = useState(null);
+  const [selectedDeployment, setSelectedDeployment] = useState(null);
+  const [modelSearchTerm, setModelSearchTerm] = useState('');
+  const [selectedModelInternalId, setSelectedModelInternalId] = useState(null);
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [settings, setSettings] = useState(() => {
+    const saved = localStorage.getItem('mf_settings');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (err) {
+        console.warn('Invalid settings payload, using defaults', err);
+      }
+    }
+    return {
+      displayName: localStorage.getItem('mf_user') || 'User',
+      autoRefresh: true,
+      refreshIntervalSec: 15,
+      compactMode: false,
+    };
+  });
 
-  /* ── Auth handlers ── */
   const handleAuth = async (e) => {
     e.preventDefault();
     setAuthError(null);
     setAuthLoading(true);
     try {
       const endpoint = authMode === 'register' ? '/auth/register' : '/auth/login';
-      const resp = await axios.post(`${API_BASE}${endpoint}`, authForm);
-      const { token: jwt, username: user } = resp.data;
-      localStorage.setItem('mf_token', jwt);
-      localStorage.setItem('mf_user', user);
-      setToken(jwt);
-      setUsername(user);
+      const { data } = await api.post(endpoint, authForm);
+      localStorage.setItem('mf_token', data.token);
+      localStorage.setItem('mf_user', data.username);
+      setToken(data.token);
       setAuthForm({ username: '', password: '' });
     } catch (err) {
       setAuthError(err.response?.data?.detail || err.message);
@@ -70,422 +66,344 @@ const App = () => {
     localStorage.removeItem('mf_token');
     localStorage.removeItem('mf_user');
     setToken(null);
-    setUsername('');
-    setSelectedModelUrl(null);
   };
 
-  /* ── Data fetchers ── */
-  const fetchDeployments = async () => {
-    setRefreshing(true);
+  const updateSettings = (partial) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...partial };
+      localStorage.setItem('mf_settings', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const clearLocalPreferences = () => {
+    localStorage.removeItem('mf_settings');
+    setSettings({
+      displayName: localStorage.getItem('mf_user') || 'User',
+      autoRefresh: true,
+      refreshIntervalSec: 15,
+      compactMode: false,
+    });
+  };
+
+  const runDiagnostics = async () => {
+    const checkedAt = new Date().toLocaleTimeString([], { hour12: false });
     try {
-      const resp = await axios.get(`${API_BASE}/containers`);
-      setDeployments(resp.data);
+      const { data } = await api.get('/health');
+      setDiagnostics({
+        apiOk: true,
+        dockerOk: !!data?.docker_available,
+        checkedAt,
+      });
+    } catch (err) {
+      setDiagnostics({
+        apiOk: false,
+        dockerOk: false,
+        checkedAt,
+      });
+    }
+  };
+
+  const fetchDeployments = async () => {
+    if (!token) return;
+    try {
+      const { data } = await api.get('/containers');
+      setDeployments(data);
+      if (selectedDeployment) {
+        const selectedId = selectedDeployment.container_id || selectedDeployment.id;
+        const refreshedSelection = data.find((dep) => (dep.container_id || dep.id) === selectedId) || null;
+        setSelectedDeployment(refreshedSelection);
+      }
     } catch (err) {
       console.error('Failed to fetch deployments', err);
+      if (err.response?.status === 401) handleLogout();
+    }
+  };
+
+  const fetchModels = async () => {
+    if (!token) return;
+    setModelsLoading(true);
+    try {
+      const { data } = await api.get('/models');
+      setModels(data.models || []);
+    } catch (err) {
+      console.error('Failed to fetch models', err);
     } finally {
-      setRefreshing(false);
+      setModelsLoading(false);
+    }
+  };
+
+  const handleRerunFromModel = async (model) => {
+    try {
+      const { data } = await api.post(`/containers/${model.container_id || model.internal_id}/rerun`);
+      await fetchDeployments();
+      await fetchModels();
+      setActiveContainerId(data.container_id);
+      setSelectedDeployment({
+        container_id: data.container_id,
+        internal_id: data.internal_id,
+        model_name: model.model_name,
+        url: data.url,
+        status: 'running'
+      });
+      setActiveTab('dashboard');
+    } catch (err) {
+      console.error('Failed to rerun model', err);
+      alert(err.response?.data?.detail || 'Failed to rerun model');
+    }
+  };
+
+  const handleDeployNewFromModel = async (model) => {
+    try {
+      const { data } = await api.post(`/models/${model.internal_id}/deploy`);
+      await fetchDeployments();
+      await fetchModels();
+      setActiveContainerId(data.container_id);
+      setSelectedDeployment({
+        container_id: data.container_id,
+        internal_id: data.internal_id,
+        model_name: model.model_name,
+        url: data.url,
+        status: 'running'
+      });
+      setActiveTab('dashboard');
+    } catch (err) {
+      console.error('Failed to create deployment from model', err);
+      alert(err.response?.data?.detail || 'Failed to create deployment from model');
+    }
+  };
+
+  const handleRerunFromDeployment = async (rerunResult, originalDeployment) => {
+    await fetchDeployments();
+    await fetchModels();
+
+    const rerunContainerId = rerunResult?.container_id;
+    const rerunUrl = rerunResult?.url;
+
+    if (rerunContainerId) {
+      setActiveContainerId(rerunContainerId);
+      setSelectedDeployment({
+        container_id: rerunContainerId,
+        internal_id: rerunResult?.internal_id || originalDeployment?.internal_id,
+        model_name: originalDeployment?.model_name,
+        url: rerunUrl,
+        status: 'running',
+      });
     }
   };
 
   const checkHealth = async () => {
     try {
-      const resp = await axios.get(`${API_BASE}/health`);
-      setHealthStatus(resp.data);
+      const { data } = await api.get('/health');
+      setHealthStatus(data);
     } catch (err) {
       setHealthStatus({ status: 'offline', docker_available: false });
     }
   };
 
   useEffect(() => {
-    fetchDeployments();
-    checkHealth();
-  }, []);
-
-  /* ── Protected actions (use auth headers) ── */
-  const handleDeploy = async (e) => {
-    e.preventDefault();
-    const modelFile = e.target.modelFile.files[0];
-    const configFile = e.target.configFile.files[0];
-
-    if (!modelFile || !configFile) {
-      setMessage({ type: 'error', text: 'Please select both model and config files.' });
-      return;
-    }
-
-    setLoading(true);
-    setMessage({ type: 'info', text: 'Deploying model... This may take a minute.' });
-
-    const formData = new FormData();
-    formData.append('model_file', modelFile);
-    formData.append('config_file', configFile);
-
-    try {
-      const resp = await axios.post(`${API_BASE}/deploy-model`, formData, {
-        headers: authHeaders(),
-      });
-      setMessage({ type: 'success', text: `Deployed successfully! ID: ${resp.data.container_id}` });
+    if (token) {
       fetchDeployments();
-      e.target.reset();
-    } catch (err) {
-      const errorMsg = err.response?.data?.detail || err.message;
-      setMessage({ type: 'error', text: `Deployment failed: ${errorMsg}` });
-    } finally {
-      setLoading(false);
+      fetchModels();
+      checkHealth();
+      if (settings.autoRefresh) {
+        const interval = setInterval(fetchDeployments, settings.refreshIntervalSec * 1000);
+        return () => clearInterval(interval);
+      }
+    }
+  }, [token, settings.autoRefresh, settings.refreshIntervalSec]);
+
+  useEffect(() => {
+    if (token && activeTab === 'models') {
+      fetchModels();
+    }
+  }, [activeTab, token]);
+
+  const normalizedSearch = modelSearchTerm.trim().toLowerCase();
+  const prefixMatches = normalizedSearch
+    ? models
+        .filter((m) => (m.model_name || '').toLowerCase().startsWith(normalizedSearch))
+        .slice(0, 8)
+    : [];
+
+  const jumpToModel = (model) => {
+    if (!model) return;
+    setActiveTab('models');
+    setSelectedModelInternalId(model.internal_id);
+    setModelSearchTerm(model.model_name || '');
+  };
+
+  const handleSearchSubmit = () => {
+    if (prefixMatches.length > 0) {
+      jumpToModel(prefixMatches[0]);
     }
   };
 
-  const handleStop = async (containerId) => {
-    if (!window.confirm(`Stop container ${containerId}?`)) return;
-    try {
-      await axios.delete(`${API_BASE}/containers/${containerId}`, {
-        headers: authHeaders(),
-      });
-      fetchDeployments();
-      if (selectedModelUrl?.includes(containerId)) setSelectedModelUrl(null);
-    } catch (err) {
-      alert('Failed to stop container');
-    }
-  };
-
-  const handleStopAll = async () => {
-    if (!window.confirm('Stop ALL containers?')) return;
-    try {
-      await axios.delete(`${API_BASE}/containers/cleanup-all`, {
-        headers: authHeaders(),
-      });
-      fetchDeployments();
-      setSelectedModelUrl(null);
-    } catch (err) {
-      alert('Failed to cleanup all');
-    }
-  };
-
-  /* ── Login / Register screen ── */
   if (!token) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
-        <div className="w-full max-w-md">
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4 font-sans">
+        <div className="w-full max-w-md bg-white p-8 rounded-2xl shadow-sm border border-slate-200">
           <div className="text-center mb-8">
-            <div className="w-14 h-14 bg-primary-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-primary-500/30">
-              <Activity className="text-white w-8 h-8" />
+            <div className="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center mx-auto mb-4">
+              <Server className="text-white w-6 h-6" />
             </div>
-            <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">ModelForge</h1>
-            <p className="text-slate-500 text-sm mt-1">ML Model Deployment Platform</p>
+            <h1 className="text-2xl font-bold text-slate-900">ModelForge</h1>
+            <p className="text-slate-500 text-sm mt-1">Sign in to continue</p>
           </div>
-
-          <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 ring-1 ring-slate-900/5">
-            <div className="flex rounded-xl bg-slate-100 p-1 mb-6">
-              <button
-                onClick={() => { setAuthMode('login'); setAuthError(null); }}
-                className={cn(
-                  "flex-1 py-2 text-sm font-semibold rounded-lg transition-all",
-                  authMode === 'login'
-                    ? "bg-white text-slate-800 shadow-sm"
-                    : "text-slate-500 hover:text-slate-700"
-                )}
-              >
-                Login
-              </button>
-              <button
-                onClick={() => { setAuthMode('register'); setAuthError(null); }}
-                className={cn(
-                  "flex-1 py-2 text-sm font-semibold rounded-lg transition-all",
-                  authMode === 'register'
-                    ? "bg-white text-slate-800 shadow-sm"
-                    : "text-slate-500 hover:text-slate-700"
-                )}
-              >
-                Register
-              </button>
+          <div className="flex bg-slate-100 p-1 rounded-lg mb-6">
+            <button onClick={() => { setAuthMode('login'); setAuthError(null); }} className={`flex-1 py-1.5 text-sm font-medium rounded-md ${authMode === 'login' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}>Login</button>
+            <button onClick={() => { setAuthMode('register'); setAuthError(null); }} className={`flex-1 py-1.5 text-sm font-medium rounded-md ${authMode === 'register' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}>Register</button>
+          </div>
+          <form onSubmit={handleAuth} className="space-y-4">
+            <div>
+              <label className="block text-slate-700 text-sm font-medium mb-1">Username</label>
+              <input type="text" required value={authForm.username} onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })} className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
             </div>
-
-            <form onSubmit={handleAuth} className="space-y-4">
-              <div>
-                <label className="block text-slate-600 mb-1.5 text-sm font-medium">Username</label>
-                <input
-                  type="text"
-                  value={authForm.username}
-                  onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })}
-                  className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
-                  placeholder="Enter username"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-slate-600 mb-1.5 text-sm font-medium">Password</label>
-                <input
-                  type="password"
-                  value={authForm.password}
-                  onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
-                  className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
-                  placeholder="Enter password"
-                  required
-                />
-              </div>
-
-              {authError && (
-                <div className="p-3 rounded-xl bg-red-50 text-red-700 text-sm flex items-center space-x-2 border border-red-100">
-                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                  <span>{authError}</span>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={authLoading}
-                className="w-full py-2.5 bg-primary-600 hover:bg-primary-700 text-white rounded-xl font-bold transition-all shadow-lg shadow-primary-500/30 disabled:opacity-50 flex items-center justify-center"
-              >
-                {authLoading ? (
-                  <RefreshCw className="animate-spin w-5 h-5 mr-2" />
-                ) : (
-                  <LogIn className="w-5 h-5 mr-2" />
-                )}
-                {authMode === 'register' ? 'Create Account' : 'Sign In'}
-              </button>
-            </form>
-          </div>
+            <div>
+              <label className="block text-slate-700 text-sm font-medium mb-1">Password</label>
+              <input type="password" required value={authForm.password} onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })} className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            {authError && <div className="p-3 bg-red-50 text-red-600 text-sm rounded-lg flex items-center"><AlertCircle className="w-4 h-4 mr-2"/>{authError}</div>}
+            <button type="submit" disabled={authLoading} className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors flex items-center justify-center disabled:opacity-50">
+              {authLoading ? <RefreshCw className="animate-spin w-4 h-4 mr-2" /> : <LogIn className="w-4 h-4 mr-2" />}
+              {authMode === 'register' ? 'Create Account' : 'Sign In'}
+            </button>
+          </form>
         </div>
       </div>
     );
   }
 
-  /* ── Main dashboard (authenticated) ── */
+  const dockerRunning = healthStatus?.docker_available || false;
+  const runningCount = deployments.filter(d => d.status === 'running' || d.state === 'running').length;
+  const errorCount = deployments.filter(d => d.status === 'exited' || d.state === 'exited').length;
+
+  const showDashboard = activeTab === 'dashboard';
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center">
-              <Activity className="text-white w-5 h-5" />
+    <div className="min-h-screen bg-[#F8FAFC] font-sans flex">
+      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
+      <main className="flex-1 ml-64 flex flex-col min-h-screen">
+        <Topbar
+          title={activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}
+          dockerRunning={dockerRunning}
+          displayName={settings.displayName || localStorage.getItem('mf_user') || 'User'}
+          searchTerm={modelSearchTerm}
+          onSearchChange={setModelSearchTerm}
+          searchSuggestions={prefixMatches}
+          onSelectSuggestion={jumpToModel}
+          onSearchSubmit={handleSearchSubmit}
+        />
+        <div className={`p-8 pb-16 flex-1 overflow-y-auto max-w-7xl mx-auto w-full ${settings.compactMode ? 'space-y-5' : 'space-y-8'}`}>
+          {activeTab !== 'settings' && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <StatCard label="Models Running" value={runningCount.toString()} icon={Activity} colorClass="bg-green-100 text-green-600" />
+              <StatCard label="Total Deployments" value={deployments.length.toString()} icon={Server} colorClass="bg-blue-100 text-blue-600" />
+              <StatCard label="Errors" value={errorCount.toString()} icon={AlertCircle} colorClass="bg-red-100 text-red-600" />
             </div>
-            <h1 className="text-xl font-bold tracking-tight text-slate-800">ModelForge</h1>
-          </div>
-          <div className="flex items-center space-x-4">
-            <div className={cn(
-              "flex items-center px-3 py-1 rounded-full text-xs font-medium border",
-              healthStatus?.docker_available
-                ? "bg-green-50 text-green-700 border-green-200"
-                : "bg-red-50 text-red-700 border-red-200"
-            )}>
-              <span className={cn(
-                "w-2 h-2 rounded-full mr-2",
-                healthStatus?.docker_available ? "bg-green-500 animate-pulse" : "bg-red-500"
-              )} />
-              {healthStatus?.docker_available ? "Docker Connected" : "Docker Offline"}
+          )}
+
+          {activeTab === 'models' && (
+            <ModelsPanel
+              models={models}
+              loading={modelsLoading}
+              onRefresh={fetchModels}
+              onRerun={handleRerunFromModel}
+              onDeployNew={handleDeployNewFromModel}
+              selectedModelInternalId={selectedModelInternalId}
+              onSelectModel={setSelectedModelInternalId}
+            />
+          )}
+
+          {activeTab === 'settings' && (
+            <SettingsPanel
+              settings={settings}
+              onSettingsChange={updateSettings}
+              username={localStorage.getItem('mf_user') || 'User'}
+              diagnostics={diagnostics}
+              onRunDiagnostics={runDiagnostics}
+              onLogout={handleLogout}
+              onClearLocalData={clearLocalPreferences}
+            />
+          )}
+
+          {showDashboard && (
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+            <div className="xl:col-span-1 min-h-[460px]">
+              <DeployCard onSuccess={async () => { await fetchDeployments(); await fetchModels(); }} />
             </div>
-            <div className="flex items-center space-x-2 pl-4 border-l border-slate-200">
-              <span className="text-sm text-slate-600 font-medium">{username}</span>
-              <button
-                onClick={handleLogout}
-                className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                title="Logout"
-              >
-                <LogOut className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto px-4 py-8 space-y-8">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Sidebar / Forms */}
-          <div className="space-y-6">
-            <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 ring-1 ring-slate-900/5">
-              <h2 className="text-lg font-semibold mb-4 flex items-center">
-                <Upload className="w-5 h-5 mr-4 text-primary-600" />
-                Deploy New Model
-              </h2>
-              <form onSubmit={handleDeploy} className="space-y-4 font-normal text-sm">
-                <div>
-                  <label className="block text-slate-600 mb-1 font-medium">Model File (.pkl, .pt, .onnx)</label>
-                  <input
-                    name="modelFile"
-                    type="file"
-                    className="block w-full text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-primary-50 file:text-primary-700 hover:file:bg-primary-100 transition-all border border-slate-200 p-1 rounded-lg"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-600 mb-1 font-medium">Config File (config.json)</label>
-                  <input
-                    name="configFile"
-                    type="file"
-                    className="block w-full text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-primary-50 file:text-primary-700 hover:file:bg-primary-100 transition-all border border-slate-200 p-1 rounded-lg"
-                    required
-                  />
-                </div>
-                <button
-                  disabled={loading}
-                  className="w-full py-2.5 bg-primary-600 hover:bg-primary-700 text-white rounded-xl font-bold transition-all shadow-lg shadow-primary-500/30 disabled:opacity-50 flex items-center justify-center"
-                >
-                  {loading ? <RefreshCw className="animate-spin w-5 h-5 mr-2" /> : <Upload className="w-5 h-5 mr-2" />}
-                  {loading ? 'Deploying...' : 'Deploy to Container'}
-                </button>
-              </form>
-
-              {message && (
-                <div className={cn(
-                  "mt-4 p-4 rounded-xl flex items-start space-x-3 text-sm",
-                  message.type === 'error' ? "bg-red-50 text-red-700 border border-red-100" :
-                    message.type === 'success' ? "bg-green-50 text-green-700 border border-green-100" :
-                      "bg-blue-50 text-blue-700 border border-blue-100"
-                )}>
-                  {message.type === 'error' ? <AlertCircle className="w-5 h-5 flex-shrink-0" /> : <CheckCircle2 className="w-5 h-5 flex-shrink-0" />}
-                  <span>{message.text}</span>
-                </div>
-              )}
-            </section>
-          </div>
-
-          {/* Main Content Area */}
-          <div className="lg:col-span-2 space-y-6">
-            <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-              <div className="flex justify-between items-center mb-6">
-                <div>
-                  <h2 className="text-lg font-semibold text-slate-800">Active Deployments</h2>
-                  <p className="text-sm text-slate-500">Managed via SQLite & Docker</p>
-                </div>
-                <div className="flex space-x-2">
-                  <button
-                    onClick={fetchDeployments}
-                    className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
-                    title="Refresh List"
-                  >
-                    <RefreshCw className={cn("w-5 h-5", refreshing && "animate-spin")} />
-                  </button>
-                  {deployments.length > 0 && (
-                    <button
-                      onClick={handleStopAll}
-                      className="px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 text-sm font-semibold rounded-lg transition-colors border border-red-100"
-                    >
-                      Clear All
-                    </button>
-                  )}
-                </div>
+            <div className="xl:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col min-h-[460px]">
+              <div className="flex items-center justify-between mb-6 border-b border-slate-100 pb-4">
+                <h2 className="text-lg font-bold text-slate-900 flex items-center"><Server className="w-5 h-5 mr-2 text-blue-600" /> Active Deployments</h2>
+                <span className="text-xs font-semibold px-2 py-1 bg-slate-100 text-slate-600 rounded-md">{deployments.length}</span>
               </div>
-
-              {deployments.length === 0 ? (
-                <div className="text-center py-12 border-2 border-dashed border-slate-100 rounded-2xl">
-                  <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <Activity className="text-slate-300 w-8 h-8" />
+              <div className="flex-1 space-y-4 overflow-y-auto pr-2">
+                {deployments.length === 0 ? (
+                  <div className="h-full flex flex-col justify-center items-center text-slate-400 border-2 border-dashed border-slate-200 rounded-xl p-8 bg-slate-50">
+                    <Server className="w-12 h-12 mb-4 opacity-50" />
+                    <p className="font-medium text-lg text-slate-600">No deployments yet</p>
                   </div>
-                  <h3 className="text-slate-900 font-semibold italic">No active deployments</h3>
-                  <p className="text-slate-400 text-sm">Upload a model to get started</p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {deployments.map((deployment) => (
-                    <div
-                      key={deployment.container_id}
-                      className={cn(
-                        "group p-4 rounded-xl border transition-all cursor-pointer",
-                        selectedModelUrl === deployment.url
-                          ? "border-primary-500 bg-primary-50/50 ring-1 ring-primary-500"
-                          : "border-slate-200 hover:border-primary-300 hover:shadow-md"
-                      )}
-                      onClick={() => setSelectedModelUrl(deployment.url)}
-                    >
-                      <div className="flex justify-between items-start mb-3">
-                        <div className="bg-white w-10 h-10 rounded-lg border border-slate-100 shadow-sm flex items-center justify-center text-primary-600">
-                          <Activity className="w-6 h-6" />
-                        </div>
-                        <div className="flex space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button
-                            onClick={(e) => { e.stopPropagation(); window.open(deployment.url, '_blank'); }}
-                            className="p-1.5 text-slate-400 hover:text-primary-600"
-                            title="Open in new tab"
-                          >
-                            <ExternalLink className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleStop(deployment.container_id); }}
-                            className="p-1.5 text-slate-400 hover:text-red-600"
-                            title="Remove"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                      <h4 className="font-bold text-slate-800 truncate" title={deployment.model_name}>
-                        {deployment.model_name}
-                      </h4>
-                      <div className="flex flex-wrap items-center gap-2 mt-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 px-2 py-0.5 bg-slate-100 rounded">
-                          {deployment.framework}
-                        </span>
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-primary-600 px-2 py-0.5 bg-primary-50 rounded">
-                          {deployment.task}
-                        </span>
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-green-600 px-2 py-0.5 bg-green-50 rounded">
-                          {deployment.status}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between mt-3 text-[10px] text-slate-400 font-mono">
-                        <span>ID: {deployment.container_id}</span>
-                        {deployment.host_port && <span>Port: {deployment.host_port}</span>}
-                      </div>
-                      {deployment.created_at && (
-                        <p className="text-[10px] text-slate-400 mt-1 flex items-center gap-1">
-                          <Clock className="w-3 h-3" />
-                          {new Date(deployment.created_at).toLocaleString()}
-                        </p>
-                      )}
+                ) : (
+                  deployments.map(dep => {
+                    const depKey = dep.container_id || dep.id;
+                    return (
+                    <div key={depKey} onClick={() => setActiveContainerId(dep.container_id || dep.id)} className={`cursor-pointer rounded-xl transition-all ${activeContainerId === (dep.container_id || dep.id) ? 'ring-2 ring-blue-500 shadow-md transform scale-[1.01]' : 'hover:shadow-md'}`}>
+                      <DeploymentItem
+                        deployment={dep}
+                        onUpdate={fetchDeployments}
+                        onOpenModel={setSelectedDeployment}
+                        onRerun={handleRerunFromDeployment}
+                      />
                     </div>
-                  ))}
-                </div>
-              )}
-            </section>
+                    );
+                  })
+                )}
+              </div>
+            </div>
           </div>
+          )}
+
+          {showDashboard && (
+          <div className="w-full xl:col-span-3">
+             <LogsPanel activeContainerId={activeContainerId} />
+          </div>
+          )}
+
+          {showDashboard && selectedDeployment && (() => {
+            const selectedId = selectedDeployment.container_id || selectedDeployment.id;
+            const selected = deployments.find((d) => (d.container_id || d.id) === selectedId) || selectedDeployment;
+            const port = selected?.host_port || selected?.port || selected?.ports?.[0]?.PublicPort || 7860;
+            const iframeUrl = selected?.url || `http://localhost:${port}`;
+            
+            return (
+              <div className="w-full bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                <div className="flex items-center justify-between p-6 bg-gradient-to-r from-blue-600 to-blue-700 text-white">
+                  <div>
+                    <h2 className="text-xl font-bold">Model Interface</h2>
+                    <p className="text-blue-100 text-sm mt-1">{selected?.model_name || selected?.name || 'Deployed Model'}</p>
+                    <p className="text-blue-200 text-xs mt-2 font-mono">{iframeUrl}</p>
+                  </div>
+                  <button
+                    onClick={() => setSelectedDeployment(null)}
+                    className="px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-lg font-medium transition-colors"
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="relative bg-slate-50" style={{ height: '700px' }}>
+                  <iframe
+                    key={iframeUrl}
+                    src={iframeUrl}
+                    className="w-full h-full border-0"
+                    title="Model Interface"
+                    onError={() => console.error(`Failed to load iframe from ${iframeUrl}`)}
+                  />
+                </div>
+              </div>
+            );
+          })()}
         </div>
-
-        {/* Iframe Viewport */}
-        {selectedModelUrl && (
-          <section className="bg-white rounded-3xl shadow-2xl border border-primary-100 overflow-hidden ring-1 ring-slate-900/5">
-            <div className="bg-primary-600 px-6 py-4 flex items-center justify-between text-white">
-              <div className="flex items-center space-x-3">
-                <div className="bg-white/20 p-2 rounded-lg backdrop-blur-sm">
-                  <Activity className="w-5 h-5 text-white" />
-                </div>
-                <div>
-                  <h2 className="font-bold">Interactive Interface</h2>
-                  <p className="text-[10px] text-primary-100 font-medium tracking-wide">MODEL RUNNING IN ISOLATED DOCKER CONTAINER</p>
-                </div>
-              </div>
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={() => window.open(selectedModelUrl, '_blank')}
-                  className="p-2 hover:bg-white/10 rounded-lg transition-colors"
-                  title="Full screen"
-                >
-                  <ExternalLink className="w-5 h-5" />
-                </button>
-                <button
-                  onClick={() => setSelectedModelUrl(null)}
-                  className="p-2 hover:bg-white/10 rounded-lg transition-colors border-l border-white/20 pl-4"
-                >
-                  <X className="w-6 h-6" />
-                </button>
-              </div>
-            </div>
-            <div className="bg-slate-50 flex items-center justify-center" style={{ height: '700px' }}>
-              <iframe
-                src={selectedModelUrl}
-                className="w-full h-full border-0"
-                title="Model Interface"
-              />
-            </div>
-          </section>
-        )}
       </main>
-
-      <footer className="max-w-7xl mx-auto px-4 py-8 mt-8 border-t border-slate-200">
-        <p className="text-center text-slate-400 text-sm">
-          ModelForge • Web Technologies and Applications Project
-        </p>
-      </footer>
     </div>
   );
-};
-
-export default App;
+}
