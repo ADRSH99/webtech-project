@@ -73,6 +73,30 @@ def get_all_deployments() -> List[Dict[str, Any]]:
     conn.close()
     return result
 
+
+def get_deployment_by_identifier(identifier: str) -> Optional[Dict[str, Any]]:
+    """Fetch a deployment by numeric DB id, container_id, or internal_id."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    row = None
+
+    if str(identifier).isdigit():
+        cursor.execute('SELECT * FROM deployments WHERE id = ?', (int(identifier),))
+        row = cursor.fetchone()
+
+    if not row:
+        cursor.execute('SELECT * FROM deployments WHERE container_id = ?', (identifier,))
+        row = cursor.fetchone()
+
+    if not row:
+        cursor.execute('SELECT * FROM deployments WHERE internal_id = ?', (identifier,))
+        row = cursor.fetchone()
+
+    conn.close()
+    return dict(row) if row else None
+
 def remove_deployment(container_id: str):
     """Remove a deployment record by container ID."""
     conn = sqlite3.connect(DB_PATH)
@@ -80,6 +104,23 @@ def remove_deployment(container_id: str):
     
     cursor.execute('DELETE FROM deployments WHERE container_id = ?', (container_id,))
     
+    conn.commit()
+    conn.close()
+
+
+def remove_deployment_by_identifier(identifier: str):
+    """Remove deployment rows by numeric DB id, container_id, or internal_id."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    if str(identifier).isdigit():
+        cursor.execute('DELETE FROM deployments WHERE id = ?', (int(identifier),))
+    else:
+        cursor.execute(
+            'DELETE FROM deployments WHERE container_id = ? OR internal_id = ?',
+            (identifier, identifier)
+        )
+
     conn.commit()
     conn.close()
 
@@ -100,6 +141,39 @@ def update_status(container_id: str, status: str):
     
     cursor.execute('UPDATE deployments SET status = ? WHERE container_id = ?', (status, container_id))
     
+    conn.commit()
+    conn.close()
+
+def update_deployment_port(container_id: str, host_port: int, url: str):
+    """Update the live host port and URL for a deployment (e.g. after Docker reassigns a port)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        'UPDATE deployments SET host_port = ?, url = ? WHERE container_id = ?',
+        (host_port, url, container_id)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def update_deployment_runtime(identifier: str, container_id: str, host_port: Optional[int], url: Optional[str], status: str):
+    """Update runtime fields by numeric id, container_id, or internal_id."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    if str(identifier).isdigit():
+        cursor.execute(
+            'UPDATE deployments SET container_id = ?, host_port = ?, url = ?, status = ? WHERE id = ?',
+            (container_id, host_port, url, status, int(identifier))
+        )
+    else:
+        cursor.execute(
+            'UPDATE deployments SET container_id = ?, host_port = ?, url = ?, status = ? WHERE container_id = ? OR internal_id = ?',
+            (container_id, host_port, url, status, identifier, identifier)
+        )
+
     conn.commit()
     conn.close()
 
