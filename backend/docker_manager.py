@@ -51,16 +51,75 @@ class DockerManager:
         self.containers_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize Docker client
+        # Try the default environment-based client first, then fall back to
+        # common connection methods on Windows (named pipe) and TCP (127.0.0.1:2375).
         try:
             self.client = docker.from_env()
             # Test connection
             self.client.ping()
             logger.info("Docker client initialized successfully")
         except DockerException as e:
-            logger.error(f"Failed to initialize Docker client: {e}")
+            logger.warning(f"Default docker.from_env() failed: {e}")
             self.client = None
-            # Don't raise HTTPException here - let the application handle it gracefully
-            logger.warning("Docker not available - deployment functionality will be disabled")
+
+            # Helper to temporarily set DOCKER_HOST and attempt connection
+            def _attempt_with_docker_host(host_value: str) -> bool:
+                old = os.environ.get("DOCKER_HOST")
+                os.environ["DOCKER_HOST"] = host_value
+                try:
+                    client = docker.from_env()
+                    client.ping()
+                    self.client = client
+                    logger.info(f"Docker client initialized via DOCKER_HOST={host_value}")
+                    return True
+                except DockerException as e2:
+                    logger.debug(f"Attempt with DOCKER_HOST={host_value} failed: {e2}")
+                    self.client = None
+                    return False
+                finally:
+                    # restore original environment
+                    if old is not None:
+                        os.environ["DOCKER_HOST"] = old
+                    else:
+                        os.environ.pop("DOCKER_HOST", None)
+
+            # Windows named pipe fallback
+            try:
+                if os.name == "nt":
+                    if _attempt_with_docker_host("npipe:////./pipe/docker_engine"):
+                        pass
+            except Exception:
+                logger.debug("Windows npipe fallback encountered an error")
+
+            # TCP fallback (useful if Docker daemon is exposed on 127.0.0.1:2375)
+            if not self.client:
+                try:
+                    _attempt_with_docker_host("tcp://127.0.0.1:2375")
+                except Exception:
+                    logger.debug("TCP fallback encountered an error")
+
+            # Last-resort: check Docker CLI availability. If CLI can reach daemon,
+            # try docker.from_env() one more time (some environments update when CLI runs).
+            if not self.client:
+                try:
+                    import subprocess
+                    res = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=5)
+                    if res.returncode == 0:
+                        try:
+                            self.client = docker.from_env()
+                            self.client.ping()
+                            logger.info("Docker client initialized after docker CLI check")
+                        except Exception as e3:
+                            logger.debug(f"docker CLI reported daemon available but SDK failed: {e3}")
+                    else:
+                        logger.debug(f"docker CLI cannot connect: {res.stderr.strip()}")
+                except Exception as e4:
+                    logger.debug(f"docker CLI check failed: {e4}")
+
+            if not self.client:
+                logger.error("Failed to initialize Docker client after fallbacks")
+                # Don't raise here - application will handle Docker being unavailable
+                logger.warning("Docker not available - deployment functionality will be disabled")
     
     def is_docker_available(self) -> bool:
         """
@@ -232,7 +291,7 @@ class DockerManager:
                 cpu_quota=int(CONTAINER_CPU_LIMIT * 100000),  # CPU limit in microseconds
                 cpu_period=100000,
                 network_mode=NETWORK_MODE,  # Enable port mapping for Gradio access
-                remove=True,  # Auto-remove on stop
+                remove=False,  # Auto-remove on stop
                 labels=container_labels
             )
             
@@ -510,14 +569,59 @@ class DockerManager:
 
     def stop_container(self, container_id: str) -> None:
         """
-        Stop a running container.
+        Stop and remove a container.
         
         Args:
             container_id: Docker container ID
         """
         try:
             container = self.client.containers.get(container_id)
-            container.stop(timeout=10)
-            logger.info(f"Stopped container: {container_id}")
+            try:
+                container.stop(timeout=10)
+            except Exception:
+                # Container may already be stopped; continue with removal.
+                pass
+            container.remove(force=True)
+            logger.info(f"Stopped and removed container: {container_id}")
         except Exception as e:
             logger.warning(f"Failed to stop container {container_id}: {e}")
+
+    def rerun_from_artifact(self, internal_id: str, framework: str, model_filename: str) -> Dict[str, any]:
+        """
+        Build and run a container from an existing artifact folder.
+
+        Args:
+            internal_id: Existing artifact folder ID
+            framework: Framework used by the model
+            model_filename: Model artifact filename inside the folder
+
+        Returns:
+            Runtime info with container ID and URL
+        """
+        if not self.is_docker_available():
+            raise HTTPException(
+                status_code=503,
+                detail="Docker is not available. Please ensure Docker Desktop or Docker Engine is installed and running."
+            )
+
+        container_path = self.containers_dir / internal_id
+        if not container_path.exists():
+            raise HTTPException(status_code=404, detail=f"Artifact folder not found for internal ID: {internal_id}")
+
+        # Ensure Dockerfile matches current framework/model file before build.
+        self.create_dockerfile(internal_id, framework, model_filename)
+        image_tag = self.build_image(internal_id)
+        run_result = self.run_container(image_tag, labels={"ml-deploy": "true", "ml-framework": framework})
+
+        host_port = run_result["host_port"]
+        ready = self.wait_for_container_ready(host_port)
+        if not ready:
+            logger.warning(f"Container {run_result['container_id'][:12]} started but Gradio may still be initialising")
+
+        return {
+            "status": "success",
+            "container_id": run_result["container_id"][:12],
+            "url": f"http://localhost:{host_port}",
+            "host_port": host_port,
+            "internal_container_id": internal_id
+        }
