@@ -24,3 +24,5 @@ Thumbs.db
 storage/
 uploads/
 containers/
+
+model_forge.db
